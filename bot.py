@@ -2,35 +2,58 @@ import os
 import logging
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, ContextTypes, filters
-from apify_client import ApifyClient
 
-# --- Setup ---
+# --- Setup Logging ---
 logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
-# --- Apify Client ---
-APIFY_API_TOKEN = os.environ.get('APIFY_API_TOKEN')
+# --- Check Environment Variables ---
 TELEGRAM_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN')
+APIFY_API_TOKEN = os.environ.get('APIFY_API_TOKEN')
 
-if not APIFY_API_TOKEN or not TELEGRAM_TOKEN:
-    raise ValueError("Missing required environment variables!")
+# Log which variables are missing for debugging
+if not TELEGRAM_TOKEN:
+    logger.error("❌ TELEGRAM_BOT_TOKEN is not set!")
+if not APIFY_API_TOKEN:
+    logger.error("❌ APIFY_API_TOKEN is not set!")
 
-client = ApifyClient(APIFY_API_TOKEN)
+# Only import Apify if token exists
+if APIFY_API_TOKEN:
+    from apify_client import ApifyClient
+    client = ApifyClient(APIFY_API_TOKEN)
+else:
+    client = None
+    logger.warning("⚠️ Apify client disabled - missing API token")
 
 # --- Bot Handlers ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "🔍 *AnswerPublicBot*\n\n"
-        "Send me a keyword or a question, and I'll use AnswerThePublic to find "
-        "what people are searching for!\n\n"
+        "Send me a keyword or a question, and I'll find what people are searching for!\n\n"
         "Example: `how to bake a cake`",
         parse_mode='Markdown'
     )
+    
+    # Check if API tokens are available
+    if not APIFY_API_TOKEN:
+        await update.message.reply_text(
+            "⚠️ *Warning:* Apify API token is not configured. "
+            "Please contact the bot administrator.",
+            parse_mode='Markdown'
+        )
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyword = update.message.text.strip()
 
     if len(keyword) < 2:
         await update.message.reply_text("Please enter a keyword with at least 2 characters.")
+        return
+
+    # Check if Apify is available
+    if not APIFY_API_TOKEN or client is None:
+        await update.message.reply_text(
+            "❌ Apify API is not configured. Please set the APIFY_API_TOKEN environment variable."
+        )
         return
 
     await update.message.reply_text(f"🔎 Researching: *{keyword}*...\n\nThis may take a moment.", parse_mode='Markdown')
@@ -54,26 +77,37 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Format a summary for Telegram
         summary = f"📊 *Results for '{keyword}':*\n\n"
         count = 0
-        for item in results[:10]:  # Limit to first 10 results
+        for item in results[:10]:
             if 'question' in item:
                 summary += f"❓ {item['question'][:100]}\n"
                 count += 1
-            if count >= 5:
-                break
+                if count >= 5:
+                    break
 
-        summary += "\n🔗 Check the full dataset at: https://console.apify.com/storage/datasets/" + run["defaultDatasetId"]
+        if count == 0:
+            summary += "No questions found in the results."
+
+        summary += "\n🔗 Full dataset: https://console.apify.com/storage/datasets/" + run["defaultDatasetId"]
         await update.message.reply_text(summary, parse_mode='Markdown')
 
     except Exception as e:
-        logging.error(f"Error: {e}")
-        await update.message.reply_text("Sorry, something went wrong while fetching data. Please try again later.")
+        logger.error(f"Error: {e}")
+        await update.message.reply_text(
+            "Sorry, something went wrong while fetching data. Please try again later.\n"
+            f"Error: {str(e)[:100]}"
+        )
 
 def main():
+    if not TELEGRAM_TOKEN:
+        logger.error("❌ Cannot start bot - TELEGRAM_BOT_TOKEN is missing!")
+        logger.error("Please add TELEGRAM_BOT_TOKEN to Railway environment variables.")
+        return
+
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
     app.add_handler(CommandHandler('start', start))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
-    print("🤖 AnswerPublicBot is starting with long polling...")
+    logger.info("🤖 AnswerPublicBot is starting with long polling...")
     app.run_polling()
 
 if __name__ == '__main__':
